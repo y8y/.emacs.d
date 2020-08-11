@@ -9,38 +9,72 @@
   "The file path that `+literate-config-file' will be tangled to, then
 byte-compiled from.")
 
+(defvar org-mode-hook)
+(defvar org-inhibit-startup)
+
+
 ;;;###autoload
 (defun +literate-tangle-h ()
   "Tangles `+literate-config-file' if it has changed."
   (print! (start "Compiling your literate config..."))
   (print-group!
-   (let* ((default-directory doom-private-dir)
-          (org    (expand-file-name +literate-config-file))
-          (dest   (concat (file-name-sans-extension +literate-config-file) ".el"))
-          (backup (make-temp-file "config.org.backup")))
-     (and (require 'ox)
-          (require 'ob-tangle)
+   (and (not (getenv "NOTANGLE"))
+        (require 'ox nil t)
+        (require 'ob-tangle nil t)
+        (letf! ((default-directory doom-private-dir)
+                (target +literate-config-file)
+                (cache +literate-config-cache-file)
+                (dest (concat (file-name-sans-extension target) ".el"))
+                ;; Operate on a copy because `org-babel-tangle' has
+                ;; side-effects we need to undo immediately as not to
+                ;; overwrite the user's config; it's bad ettiquite.
+                (backup (make-temp-file (concat (file-name-nondirectory target) ".")))
+
+                ;; HACK A hack to prevent ob-tangle from operating relative to
+                ;;      the backup file and thus tangling to the wrong
+                ;;      destinations.
+                (defun org-babel-tangle-single-block (&rest args)
+                  (let* ((spec (apply org-babel-tangle-single-block args))
+                         (file (nth 1 spec))
+                         (file (if (file-equal-p file backup) target file))
+                         (file (if org-babel-tangle-use-relative-file-links
+                                   (file-relative-name file)
+                                 file)))
+                    (setf (nth 1 spec) file)
+                    spec))
+                ;; Ensure output conforms to the formatting of all doom CLIs
+                (defun message (msg &rest args)
+                  (when msg
+                    (print! (info "%s") (apply #'format msg args)))))
           (unwind-protect
-              (letf! ((defun message (msg &rest args)
-                        (when msg
-                          (print! (info "%s") (apply #'format msg args))))
+              (with-temp-file backup
+                (insert-file-contents file)
+                (let ((buffer-file-name backup)
+                      ;; Prevent unwanted entries in recentf, or formatters, or
+                      ;; anything that could be on these hooks, really. Nothing
+                      ;; else should be touching these files (particularly in
+                      ;; interactive sessions).
+                      (write-file-functions nil)
+                      (before-save-hook nil)
+                      (after-save-hook nil)
                       ;; Prevent infinite recursion due to recompile-on-save
-                      ;; hooks later.
-                      (org-mode-hook nil))
-                ;; Do the ol' switcheroo because `org-babel-tangle' writes
-                ;; changes to the user's literate config, which would impose on
-                ;; the user.
-                (copy-file org backup t)
-                (with-current-buffer (find-file-noselect org)
-                  ;; Tangling won't ordinarily expand #+INCLUDE directives, so
-                  ;; we do it ourselves.
-                  (org-export-expand-include-keyword)
-                  (org-babel-tangle nil dest))
-                t)
-            (ignore-errors (copy-file backup org t))
+                      ;; hooks later, and speed up `org-mode' init.
+                      (org-mode-hook nil)
+                      (org-inhibit-startup t))
+                  (org-mode)
+                  (with-silent-modifications
+                    ;; Tangling won't ordinarily expand #+INCLUDE directives,
+                    ;; so I do it myself.
+                    (org-export-expand-include-keyword)
+                    (org-babel-tangle nil dest))))
             (ignore-errors (delete-file backup)))
           ;; Write an empty file to serve as our mtime cache
-          (with-temp-file +literate-config-cache-file)))))
+          (with-temp-file cache)
+          (unless doom-interactive-p
+            (message "Restarting..." )
+            (doom-cli-execute-lines-after "NOTANGLE=1 \"$@\"")
+            (kill-emacs 0))
+          t))))
 
 ;;;###autoload
 (add-hook 'org-mode-hook #'+literate-enable-recompile-h)
